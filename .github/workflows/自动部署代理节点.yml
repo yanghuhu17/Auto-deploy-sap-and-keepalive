@@ -1,13 +1,23 @@
-name: 部署 VMESS+TLS 节点（SG free）
+name: 手动部署 VMESS+TLS 节点（SG free）
 
 on:
   workflow_dispatch:
+    inputs:
+      app_name:
+        description: '应用名称（可选，留空自动生成）'
+        required: false
+        default: ''
+      memory:
+        description: '内存大小'
+        required: false
+        default: '512M'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout 仓库
+      - name: 检出代码
         uses: actions/checkout@v4
 
       - name: 安装 Cloud Foundry CLI
@@ -19,9 +29,14 @@ jobs:
         run: |
           echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
           echo "DOCKER_IMAGE=ghcr.io/uncleluogithub/mous:latest" >> $GITHUB_ENV
-          echo "MEMORY=512M" >> $GITHUB_ENV
+          echo "MEMORY=${{ github.event.inputs.memory }}" >> $GITHUB_ENV
           RAND=$(head /dev/urandom | tr -dc a-z0-9 | head -c 5)
-          echo "APP_NAME=vmess-sg-${RAND}" >> $GITHUB_ENV
+
+          if [ -n "${{ github.event.inputs.app_name }}" ]; then
+            echo "APP_NAME=${{ github.event.inputs.app_name }}" >> $GITHUB_ENV
+          else
+            echo "APP_NAME=vmess-sg-${RAND}" >> $GITHUB_ENV
+          fi
 
       - name: 登录 SAP Cloud Foundry
         run: |
@@ -29,13 +44,16 @@ jobs:
             -u "${{ secrets.EMAIL }}" \
             -p "${{ secrets.PASSWORD }}" \
             --skip-ssl-validation
+
           ORG=$(cf orgs | sed -n 2p)
           SPACE=$(cf spaces | sed -n 2p)
+          echo "ORG=$ORG" >> $GITHUB_ENV
+          echo "SPACE=$SPACE" >> $GITHUB_ENV
           cf target -o "$ORG" -s "$SPACE"
 
       - name: 部署 VMESS+TLS 节点
         run: |
-          echo "正在部署 VMESS+TLS 节点..."
+          echo "🚀 开始部署 VMESS+TLS 节点..."
           if cf push ${{ env.APP_NAME }} \
             --docker-image ${{ env.DOCKER_IMAGE }} \
             -m ${{ env.MEMORY }} \
@@ -43,7 +61,7 @@ jobs:
             echo "✅ 部署成功"
           else
             cf delete ${{ env.APP_NAME }} -r -f
-            echo "❌ 部署失败，请稍后重试"
+            echo "❌ 部署失败，已清理，请稍后重试"
             exit 1
           fi
 
@@ -53,7 +71,7 @@ jobs:
           cf set-env ${{ env.APP_NAME }} UUID "${{ secrets.UUID }}"
           cf restage ${{ env.APP_NAME }}
 
-      - name: 输出节点信息和 vmess 链接
+      - name: 输出节点信息与 vmess 链接
         run: |
           ROUTE=$(cf app ${{ env.APP_NAME }} | grep "routes:" | awk '{print $2}')
           if [ -z "$ROUTE" ]; then
@@ -61,13 +79,12 @@ jobs:
           fi
 
           echo ""
-          echo "🚀 部署完成！"
+          echo "🎉 部署完成！"
           echo "🌍 区域: SG(free)"
-          echo "📦 应用: ${{ env.APP_NAME }}"
+          echo "📦 应用名称: ${{ env.APP_NAME }}"
           echo "🔗 节点地址: https://$ROUTE"
           echo "🖼 镜像: ${{ env.DOCKER_IMAGE }}"
 
-          # 自动生成 vmess 链接
           VMESS_JSON=$(cat <<EOF
 {
   "v": "2",
@@ -79,12 +96,12 @@ jobs:
   "net": "ws",
   "type": "none",
   "host": "$ROUTE",
-  "path": "/",
+  "path": "/vmess",
   "tls": "tls"
 }
 EOF
 )
           VMESS_BASE64=$(echo "$VMESS_JSON" | base64 -w 0)
           echo ""
-          echo "🔑 VMESS 链接："
+          echo "🔑 复制以下链接导入到 Clash / v2rayN："
           echo "vmess://$VMESS_BASE64"
