@@ -17,11 +17,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 检出代码
+      - name: Checkout 仓库
         uses: actions/checkout@v4
 
       - name: 安装 Cloud Foundry CLI
         run: |
+          wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
+          echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
           sudo apt-get update -y
           sudo apt-get install -y cf8-cli
 
@@ -30,8 +32,7 @@ jobs:
           echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
           echo "DOCKER_IMAGE=ghcr.io/uncleluogithub/mous:latest" >> $GITHUB_ENV
           echo "MEMORY=${{ github.event.inputs.memory }}" >> $GITHUB_ENV
-          RAND=$(head /dev/urandom | tr -dc a-z0-9 | head -c 5)
-
+          RAND=$(head -c 64 /dev/urandom | tr -dc 'a-z0-9' | head -c 5)
           if [ -n "${{ github.event.inputs.app_name }}" ]; then
             echo "APP_NAME=${{ github.event.inputs.app_name }}" >> $GITHUB_ENV
           else
@@ -40,11 +41,9 @@ jobs:
 
       - name: 登录 SAP Cloud Foundry
         run: |
-          cf login -a ${{ env.CF_API }} \
-            -u "${{ secrets.EMAIL }}" \
-            -p "${{ secrets.PASSWORD }}" \
-            --skip-ssl-validation
-
+          # CF_API 来自上一步写入的 GITHUB_ENV
+          echo "登录到 Cloud Foundry: $CF_API"
+          cf login -a "$CF_API" -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}" --skip-ssl-validation
           ORG=$(cf orgs | sed -n 2p)
           SPACE=$(cf spaces | sed -n 2p)
           echo "ORG=$ORG" >> $GITHUB_ENV
@@ -53,55 +52,55 @@ jobs:
 
       - name: 部署 VMESS+TLS 节点
         run: |
-          echo "🚀 开始部署 VMESS+TLS 节点..."
-          if cf push ${{ env.APP_NAME }} \
-            --docker-image ${{ env.DOCKER_IMAGE }} \
-            -m ${{ env.MEMORY }} \
+          echo "开始部署 ${APP_NAME} ..."
+          if cf push "${APP_NAME}" \
+            --docker-image "${DOCKER_IMAGE}" \
+            -m "${MEMORY}" \
             --health-check-type port; then
             echo "✅ 部署成功"
           else
-            cf delete ${{ env.APP_NAME }} -r -f
-            echo "❌ 部署失败，已清理，请稍后重试"
+            cf delete "${APP_NAME}" -r -f || true
+            echo "❌ 部署失败，已清理"
             exit 1
           fi
 
-      - name: 注入环境变量
+      - name: 注入 UUID 并重启
         run: |
-          cf set-env ${{ env.APP_NAME }} NAME "VMESS+TLS"
-          cf set-env ${{ env.APP_NAME }} UUID "${{ secrets.UUID }}"
-          cf restage ${{ env.APP_NAME }}
+          cf set-env "${APP_NAME}" NAME "VMESS+TLS"
+          cf set-env "${APP_NAME}" UUID "${{ secrets.UUID }}"
+          cf restage "${APP_NAME}"
 
       - name: 输出节点信息与 vmess 链接
         run: |
-          ROUTE=$(cf app ${{ env.APP_NAME }} | grep "routes:" | awk '{print $2}')
+          ROUTE=$(cf app "${APP_NAME}" | grep routes: | awk '{print $2}')
           if [ -z "$ROUTE" ]; then
-            ROUTE=$(cf routes | grep ${{ env.APP_NAME }} | awk '{print $2}' | head -n 1)
+            ROUTE=$(cf routes | grep "${APP_NAME}" | awk '{print $2}' | head -n 1)
           fi
 
           echo ""
           echo "🎉 部署完成！"
           echo "🌍 区域: SG(free)"
-          echo "📦 应用名称: ${{ env.APP_NAME }}"
+          echo "📦 应用名称: ${APP_NAME}"
           echo "🔗 节点地址: https://$ROUTE"
-          echo "🖼 镜像: ${{ env.DOCKER_IMAGE }}"
+          echo "🖼 镜像: ${DOCKER_IMAGE}"
 
           VMESS_JSON=$(cat <<EOF
 {
-  "v": "2",
-  "ps": "SG-free",
-  "add": "$ROUTE",
-  "port": "443",
-  "id": "${{ secrets.UUID }}",
-  "aid": "0",
-  "net": "ws",
-  "type": "none",
-  "host": "$ROUTE",
-  "path": "/vmess",
-  "tls": "tls"
+  "v":"2",
+  "ps":"SG-free",
+  "add":"$ROUTE",
+  "port":"443",
+  "id":"${{ secrets.UUID }}",
+  "aid":"0",
+  "net":"ws",
+  "type":"none",
+  "host":"$ROUTE",
+  "path":"/vmess",
+  "tls":"tls"
 }
 EOF
 )
-          VMESS_BASE64=$(echo "$VMESS_JSON" | base64 -w 0)
+          VMESS_BASE64=$(echo -n "$VMESS_JSON" | base64 -w 0)
           echo ""
-          echo "🔑 复制以下链接导入到 Clash / v2rayN："
+          echo "🔑 VMESS 链接："
           echo "vmess://$VMESS_BASE64"
